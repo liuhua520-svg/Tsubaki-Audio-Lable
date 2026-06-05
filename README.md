@@ -51,39 +51,13 @@ Tsubaki-Audio-Lable/
 ## 安装与运行
 
 ### 环境要求
-- **Node.js 14+**
-- **Python 3.10.20** (与 GPT-SoVITS MFA Aligner 保持一致)
+- Node.js 14+
+- Python 3.8+
 - Windows 10 x64 或其他现代操作系统
 
 ### 快速开始
 
-#### 使用 Python 3.10.20 环境
-
-可以使用现有的 `.mfa_env` 环境（gpt-sovits-mfa-aligner 的 Python 3.10.20 虚拟环境），路径为：
-```
-C:\Users\Administrator\Downloads\files13\.mfa_env
-```
-
-或创建新的虚拟环境：
-
 ```bash
-# 使用 pyenv（推荐）
-pyenv install 3.10.20
-pyenv local 3.10.20
-
-# 或使用 conda
-conda create -n tsubaki python=3.10.20
-conda activate tsubaki
-```
-
-#### 安装依赖和运行
-
-```bash
-# 激活虚拟环境（如果使用现有的 .mfa_env）
-C:\Users\Administrator\Downloads\files13\.mfa_env\Scripts\activate
-
-# 或在已激活的 Python 3.10.20 环境中执行以下命令
-
 # 安装 NPM 依赖
 npm install
 
@@ -91,9 +65,7 @@ npm install
 npm run build
 
 # 安装 Python 依赖
-pip install -r requirements.txt
-# 或
-pip install -e .
+npm run requirements
 
 # 启动应用
 python app.py
@@ -132,13 +104,11 @@ npm run dev
 
 ## 与 GPT-SoVITS-MFA-Aligner 的集成
 
-本项目设计用于与 gpt-sovits-mfa-aligner 无缝集成，并使用相同的 Python 版本（3.10.20）以确保最大兼容性：
+本项目设计用于与 gpt-sovits-mfa-aligner 无缝集成：
 
 1. **Lab 文件导入**: 直接导入 GPT-SoVITS MFA Aligner 导出的 `.lab` 标注文件
 2. **音频处理**: 加载对应的音频文件进行音高提取和处理
 3. **文件导出**: 生成标准格式的工程文件供其他软件使用
-4. **版本一致性**: 两个项目使用相同的 Python 3.10.20 环境，减少集成问题
-5. **共享环境**: 可以使用同一个 Python 3.10.20 虚拟环境，位置在 `C:\Users\Administrator\Downloads\files13\.mfa_env`
 
 ## 许可证
 

@@ -1,5 +1,7 @@
+import './main.css'   // ← 加这一行
 import { createApp } from 'vue'
 import { App } from './components/app.vue'
+// ... 其余不变
 
 const getBackend = (el = document.documentElement) => {
   let backend = el.dataset.backend
