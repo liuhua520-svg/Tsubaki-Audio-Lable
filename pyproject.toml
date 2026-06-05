@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tsubaki-audio-label"
+version = "0.1.0"
+description = "A modern audio processing studio for audio annotation and pitch merge processing"
+authors = [{name = "liuhua233-cmd"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10.20"
+keywords = ["audio", "annotation", "pitch", "vocoder"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+]
+
+dependencies = [
+    "numpy",
+    "pyworld",
+    "msgpack",
+    "soundfile",
+    "flask",
+    "flask-cors",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "flake8",
+]
+
+[project.urls]
+homepage = "https://github.com/liuhua233-cmd/Tsubaki-Audio-Lable"
+repository = "https://github.com/liuhua233-cmd/Tsubaki-Audio-Lable"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+multi_line_mode = 3
+line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
