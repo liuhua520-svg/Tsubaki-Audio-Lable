@@ -1,115 +1,136 @@
 <template>
   <div class="pitch-extractor">
     <div class="extractor-header">
-      <h3>🎼 音高提取</h3>
-      <p class="hint">选择算法提取音频的基频轨迹</p>
+      <h3>🎼 音高提取控制台</h3>
+      <p class="hint">选择算法并配置参数，由后端 PyWorld 完成提取</p>
     </div>
 
-    <div class="algorithm-selector">
-      <label>
-        <input type="radio" value="dio" v-model="selectedAlgorithm" :disabled="isExtracting" />
-        <span>DIO (快速)</span>
+    <!-- Algorithm selector -->
+    <div class="section">
+      <label class="section-label">提取算法</label>
+      <div class="radio-group">
+        <label class="radio-option" :class="{ active: algorithm === 'dio' }">
+          <input
+            type="radio"
+            value="dio"
+            :checked="algorithm === 'dio'"
+            :disabled="isProcessing"
+            @change="$emit('update:algorithm', 'dio')"
+          />
+          <span class="radio-title">DIO</span>
+          <span class="radio-desc">快速，适合实时处理</span>
+        </label>
+        <label class="radio-option" :class="{ active: algorithm === 'harvest' }">
+          <input
+            type="radio"
+            value="harvest"
+            :checked="algorithm === 'harvest'"
+            :disabled="isProcessing"
+            @change="$emit('update:algorithm', 'harvest')"
+          />
+          <span class="radio-title">Harvest</span>
+          <span class="radio-desc">高质量，适合精确分析</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Sharpness slider -->
+    <div class="section">
+      <label class="section-label">
+        音高锐化 (消除颤动)
+        <span class="section-value">{{ Math.round(sharpness * 100) }}%</span>
       </label>
-      <label>
-        <input type="radio" value="harvest" v-model="selectedAlgorithm" :disabled="isExtracting" />
-        <span>Harvest (高质量)</span>
+      <input
+        type="range"
+        min="0"
+        max="1"
+        step="0.05"
+        :value="sharpness"
+        :disabled="isProcessing"
+        class="slider"
+        @input="$emit('update:sharpness', +($event.target as HTMLInputElement).value)"
+      />
+      <p class="section-hint">值越大音高越稳定，但可能失去自然颤音</p>
+    </div>
+
+    <!-- Base frequency -->
+    <div class="section">
+      <label class="section-label">
+        基准音高 (Hz)
+        <span class="section-hint-inline">男声 ~60Hz，女声 ~120Hz</span>
       </label>
+      <input
+        type="number"
+        min="40"
+        max="400"
+        :value="baseFrequency"
+        :disabled="isProcessing"
+        class="number-input"
+        @change="$emit('update:baseFrequency', +($event.target as HTMLInputElement).value)"
+      />
     </div>
 
-    <button
-      class="extract-btn"
-      @click="extractPitch"
-      :disabled="!waveformData || isExtracting"
-    >
-      <span v-if="!isExtracting">提取音高</span>
-      <span v-else>处理中 {{ extractProgress }}%</span>
-    </button>
+    <!-- Action buttons -->
+    <div class="actions">
+      <button
+        class="btn btn-primary"
+        :disabled="!audioLoaded || isProcessing"
+        @click="$emit('extract-pitch')"
+      >
+        <span v-if="isProcessing" class="btn-spinner"></span>
+        <span v-else>🎯</span>
+        {{ isProcessing ? '提取中...' : '提取音高' }}
+      </button>
 
-    <div v-if="extractProgress > 0 && isExtracting" class="progress-bar">
-      <div class="progress" :style="{ width: extractProgress + '%' }"></div>
+      <button
+        class="btn btn-secondary"
+        :disabled="!pitchExtracted || isProcessing"
+        @click="$emit('sharpen-pitch')"
+      >
+        ✨ 音高锐化
+      </button>
+
+      <button
+        class="btn btn-ghost"
+        :disabled="!pitchExtracted || isProcessing"
+        @click="$emit('undo')"
+      >
+        ↩ 撤销
+      </button>
     </div>
 
-    <div v-if="error" class="error-message">
-      <span>⚠️ {{ error }}</span>
-      <button class="close-btn" @click="error = ''">✕</button>
+    <!-- Status -->
+    <div v-if="!audioLoaded" class="status-hint">
+      <span class="status-icon">ℹ️</span> 请先在「波形图」标签页上传音频文件
     </div>
-
-    <div v-if="pitchData" class="success-message">
-      <span>✓ 音高提取成功！</span>
+    <div v-else-if="pitchExtracted && !isProcessing" class="status-success">
+      <span class="status-icon">✓</span> 音高已提取，可在下方编辑器查看
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+// This component is a pure UI control panel.
+// All actual pitch extraction logic lives in App.vue; this component only emits events.
+// Props match exactly what App.vue passes; emits match what App.vue listens for.
 
-const props = defineProps({
-  waveformData: {
-    type: Float32Array,
-    required: false
-  },
-  sampleRate: {
-    type: Number,
-    default: 0
-  }
-})
+defineProps<{
+  audioLoaded: boolean
+  pitchExtracted: boolean
+  algorithm: 'dio' | 'harvest'
+  sharpness: number
+  baseFrequency: number
+  isProcessing: boolean
+}>()
 
-const emit = defineEmits(['pitch-extracted', 'error'])
-
-const selectedAlgorithm = ref<'dio' | 'harvest'>('dio')
-const isExtracting = ref(false)
-const extractProgress = ref(0)
-const error = ref('')
-const pitchData = ref<Float32Array | null>(null)
-
-const extractPitch = async () => {
-  if (!props.waveformData || props.sampleRate === 0) {
-    error.value = '请先加载音频文件'
-    return
-  }
-
-  isExtracting.value = true
-  extractProgress.value = 0
-  error.value = ''
-
-  try {
-    const progressInterval = setInterval(() => {
-      extractProgress.value = Math.min(extractProgress.value + Math.random() * 30, 90)
-    }, 500)
-
-    const endpoint = selectedAlgorithm.value === 'dio' ? '/pyworld/dio' : '/pyworld/harvest'
-    
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream'
-      },
-      body: props.waveformData.buffer
-    })
-
-    clearInterval(progressInterval)
-    extractProgress.value = 100
-
-    if (!response.ok) {
-      throw new Error(`音高提取失败: ${response.statusText}`)
-    }
-
-    const buffer = await response.arrayBuffer()
-    const data = JSON.parse(new TextDecoder().decode(buffer))
-    
-    pitchData.value = new Float32Array(data.f0.buffer)
-    emit('pitch-extracted', pitchData.value)
-
-    setTimeout(() => {
-      extractProgress.value = 0
-    }, 1000)
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : '未知错误'
-    emit('error', error.value)
-  } finally {
-    isExtracting.value = false
-  }
-}
+defineEmits<{
+  'extract-pitch': []
+  'sharpen-pitch': []
+  'undo': []
+  'update:algorithm': [value: string]
+  'update:sharpness': [value: number]
+  'update:baseFrequency': [value: number]
+}>()
 </script>
 
 <style scoped>
@@ -117,116 +138,250 @@ const extractPitch = async () => {
   background: white;
   border-radius: 8px;
   padding: 20px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
-}
-
-.extractor-header {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
   margin-bottom: 16px;
 }
 
+.extractor-header {
+  margin-bottom: 20px;
+}
+
 .extractor-header h3 {
-  margin: 0 0 8px 0;
-  font-size: 16px;
-  color: #333;
+  margin: 0 0 4px 0;
+  font-size: 15px;
+  color: #2d3748;
+  font-weight: 600;
 }
 
 .hint {
   margin: 0;
   font-size: 12px;
-  color: #999;
+  color: #a0aec0;
 }
 
-.algorithm-selector {
-  display: flex;
-  gap: 20px;
-  margin-bottom: 16px;
+.section {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #f0f0f0;
 }
 
-.algorithm-selector label {
+.section:last-of-type {
+  border-bottom: none;
+}
+
+.section-label {
   display: flex;
+  justify-content: space-between;
   align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #4a5568;
+  margin-bottom: 10px;
+}
+
+.section-value {
+  font-size: 13px;
+  font-weight: 700;
+  color: #667eea;
+}
+
+.section-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #a0aec0;
+}
+
+.section-hint-inline {
+  font-size: 11px;
+  color: #a0aec0;
+  font-weight: 400;
+}
+
+/* Radio group */
+.radio-group {
+  display: flex;
+  gap: 10px;
+}
+
+.radio-option {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
   gap: 8px;
+  padding: 12px;
+  border: 2px solid #e2e8f0;
+  border-radius: 8px;
   cursor: pointer;
-  font-size: 14px;
+  transition: all 0.15s ease;
+  position: relative;
 }
 
-.algorithm-selector input[type='radio'] {
+.radio-option input {
+  margin-top: 2px;
   cursor: pointer;
+  accent-color: #667eea;
 }
 
-.algorithm-selector input[type='radio']:disabled {
+.radio-option input:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
 
-.extract-btn {
-  width: 100%;
-  padding: 12px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.3s ease;
-  margin-bottom: 12px;
+.radio-option.active {
+  border-color: #667eea;
+  background: #f0f3ff;
 }
 
-.extract-btn:hover:not(:disabled) {
-  transform: translateY(-2px);
+.radio-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2d3748;
+  display: block;
+}
+
+.radio-desc {
+  font-size: 11px;
+  color: #a0aec0;
+  display: block;
+}
+
+/* Slider */
+.slider {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #e2e8f0;
+  cursor: pointer;
+}
+
+.slider:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #667eea;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(102, 126, 234, 0.4);
+}
+
+.slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #667eea;
+  cursor: pointer;
+  border: none;
+}
+
+/* Number input */
+.number-input {
+  width: 120px;
+  padding: 8px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #2d3748;
+  transition: border-color 0.15s;
+}
+
+.number-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.number-input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Actions */
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  flex: 1;
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
 }
 
-.extract-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.btn-secondary {
+  background: #ebf4ff;
+  color: #3182ce;
+  border: 1px solid #bee3f8;
 }
 
-.progress-bar {
-  width: 100%;
-  height: 4px;
-  background: #eee;
-  border-radius: 2px;
-  overflow: hidden;
-  margin-bottom: 12px;
+.btn-secondary:hover:not(:disabled) { background: #bee3f8; }
+
+.btn-ghost {
+  background: #f7fafc;
+  color: #718096;
+  border: 1px solid #e2e8f0;
 }
 
-.progress {
-  height: 100%;
-  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-  transition: width 0.3s ease;
+.btn-ghost:hover:not(:disabled) { background: #edf2f7; }
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 
-.error-message {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: #fee;
-  border-left: 4px solid #f66;
-  border-radius: 4px;
-  color: #c33;
-  font-size: 13px;
-  margin-bottom: 12px;
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.close-btn {
-  background: none;
-  border: none;
-  color: #c33;
-  cursor: pointer;
-  font-size: 16px;
-}
-
-.success-message {
+/* Status messages */
+.status-hint,
+.status-success {
   display: flex;
   align-items: center;
-  padding: 12px 16px;
-  background: #efe;
-  border-left: 4px solid #4caf50;
-  border-radius: 4px;
-  color: #4caf50;
-  font-size: 13px;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-top: 12px;
 }
+
+.status-hint {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.status-success {
+  background: #f0fff4;
+  color: #276749;
+  border: 1px solid #9ae6b4;
+}
+
+.status-icon { font-size: 14px; }
 </style>
