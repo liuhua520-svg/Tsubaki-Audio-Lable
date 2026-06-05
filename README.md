@@ -116,6 +116,5 @@ MIT License
 
 ## 参考
 
-- [Koharu Label](https://github.com/bolanxian/koharu-label) - 原始实现参考
 - [PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder/)
 - [WORLD Vocoder](https://github.com/mmorise/World/)
