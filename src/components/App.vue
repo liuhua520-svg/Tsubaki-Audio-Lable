@@ -1,30 +1,53 @@
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue'
-
-const backend = ref('python')
-const baseURL = ref('/')
+import FileUploadPanel from './FileUploadPanel.vue'
+import WaveformViewer from './WaveformViewer.vue'
+import PitchEditor from './PitchEditor.vue'
+import PitchExtractor from './PitchExtractor.vue'
+import ExportPanel from './ExportPanel.vue'
 
 const state = reactive({
+  // Audio data
   audioFile: null as File | null,
   waveformData: null as Float32Array | null,
   sampleRate: 0,
+  duration: 0,
+  
+  // Pitch data
   f0Data: null as Float32Array | null,
-  spectrogramData: null as Float32Array | null,
-  aperiodicityData: null as Float32Array | null,
+  f0Backup: null as Float32Array | null, // Backup for undo
+  timeAxis: null as Float32Array | null,
+  
+  // LAB data
+  labContent: null as string | null,
+  labFile: null as File | null,
+  
+  // UI state
   isProcessing: false,
   error: null as string | null,
+  success: null as string | null,
+  activeTab: 'waveform' as 'waveform' | 'pitch' | 'export',
+  
+  // Settings
+  f0Algorithm: 'dio' as 'dio' | 'harvest',
+  pitchSharpness: 0.5,
+  baseFrequency: 60,
 })
 
-const supportedFormats = computed(() => ['wav', 'mp3', 'flac', 'ogg', 'm4a'])
+const baseURL = ref('http://127.0.0.1:6701/')
+const isAudioLoaded = computed(() => !!state.waveformData)
+const isPitchExtracted = computed(() => !!state.f0Data)
+const canExport = computed(() => !!state.f0Data || !!state.labContent)
 
-async function loadAudioFile(file: File) {
+// File upload handlers
+async function handleAudioUpload(file: File) {
   try {
     state.error = null
+    state.success = null
     state.isProcessing = true
-    state.audioFile = file
-
-    if (file.size > 100 * 1024 * 1024) {
-      throw new Error(`文件过大: ${(file.size / 1024 / 1024).toFixed(2)}MB (最大100MB)`)
+    
+    if (file.size > 500 * 1024 * 1024) {
+      throw new Error('音频文件过大 (最大500MB)')
     }
 
     const response = await fetch(`${baseURL.value}soundfile/read`, {
@@ -35,12 +58,18 @@ async function loadAudioFile(file: File) {
     if (!response.ok) throw new Error('音频加载失败')
 
     const buffer = await response.arrayBuffer()
-    // 这里假设后端返回 msgpack 格式，需要 msgpack 解析库
-    // 简化处理：直接从 buffer 中提取数据
-    const data = JSON.parse(new TextDecoder().decode(buffer))
+    // Backend returns msgpack format, need to decode
+    const decoder = new TextDecoder()
+    const data = JSON.parse(decoder.decode(buffer))
     
+    state.audioFile = file
     state.waveformData = new Float32Array(data.data.buffer)
     state.sampleRate = data.fs
+    state.duration = state.waveformData.length / state.sampleRate
+    state.f0Data = null // Reset pitch data
+    state.labContent = null
+    
+    state.success = `成功加载: ${file.name} (${(state.duration).toFixed(2)}s)`
   } catch (err) {
     state.error = err instanceof Error ? err.message : '未知错误'
   } finally {
@@ -48,37 +77,87 @@ async function loadAudioFile(file: File) {
   }
 }
 
-// src/components/App.vue
+async function handleLabUpload(file: File) {
+  try {
+    state.error = null
+    state.success = null
+    
+    const content = await file.text()
+    state.labFile = file
+    state.labContent = content
+    
+    // Parse LAB file to extract pitch data
+    parseLabFile(content)
+    
+    state.success = `成功导入 LAB 文件: ${file.name}`
+  } catch (err) {
+    state.error = err instanceof Error ? err.message : '导入失败'
+  }
+}
+
+function parseLabFile(content: string) {
+  try {
+    const lines = content.trim().split('\n')
+    const f0Data: number[] = []
+    
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/)
+      if (parts.length >= 3) {
+        const pitch = parseFloat(parts[2])
+        f0Data.push(pitch)
+      }
+    }
+    
+    if (f0Data.length > 0) {
+      state.f0Data = new Float32Array(f0Data)
+      state.activeTab = 'pitch'
+    }
+  } catch (err) {
+    console.error('LAB文件解析错误:', err)
+    throw new Error('LAB文件格式错误')
+  }
+}
+
+// Pitch extraction
 async function extractPitch() {
   if (!state.waveformData) return
 
   try {
     state.error = null
     state.isProcessing = true
+    state.f0Backup = state.f0Data ? new Float32Array(state.f0Data) : null
 
-    // 创建 Uint8Array 来包装 Float32Array 的 buffer
+    const algorithm = state.f0Algorithm === 'dio' ? 'dio' : 'harvest'
+    const endpoint = `${baseURL.value}pyworld/${algorithm}`
+    
+    // Convert Float32Array to Uint8Array
     const uint8Data = new Uint8Array(state.waveformData.buffer)
     
-    const response = await fetch(`${baseURL.value}pyworld/dio`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       body: uint8Data as any,
       headers: { 'Content-Type': 'application/msgpack' },
     })
 
-    if (!response.ok) throw new Error('音高提取失败')
-    // ... 后续保持不变
+    if (!response.ok) throw new Error(`${algorithm.toUpperCase()}算法提取失败`)
 
     const buffer = await response.arrayBuffer()
     const data = JSON.parse(new TextDecoder().decode(buffer))
+    
     state.f0Data = new Float32Array(data.f0.buffer)
+    state.timeAxis = new Float32Array(data.t.buffer)
+    state.activeTab = 'pitch'
+    
+    state.success = `${algorithm.toUpperCase()}算法提取成功`
   } catch (err) {
-    state.error = err instanceof Error ? err.message : '未知错误'
+    state.error = err instanceof Error ? err.message : '提取失败'
   } finally {
     state.isProcessing = false
   }
 }
 
-async function sharpenPitch(sharpness: number) {
+// Pitch sharpening
+async function sharpenPitch() {
   if (!state.f0Data) return
 
   try {
@@ -89,7 +168,7 @@ async function sharpenPitch(sharpness: number) {
       method: 'POST',
       body: JSON.stringify({
         f0: Array.from(state.f0Data),
-        sharpness,
+        sharpness: state.pitchSharpness,
       }),
       headers: { 'Content-Type': 'application/json' },
     })
@@ -98,67 +177,88 @@ async function sharpenPitch(sharpness: number) {
 
     const data = await response.json()
     state.f0Data = new Float32Array(data.buffer || data)
+    
+    state.success = `音高锐化成功 (锐化度: ${state.pitchSharpness})`
   } catch (err) {
-    state.error = err instanceof Error ? err.message : '未知错误'
+    state.error = err instanceof Error ? err.message : '锐化失败'
   } finally {
     state.isProcessing = false
   }
 }
 
-async function exportLabel(format: 'lab' | 'json') {
-  if (!state.f0Data || !state.audioFile) return
+// Undo last pitch operation
+function undoPitchEdit() {
+  if (state.f0Backup) {
+    state.f0Data = new Float32Array(state.f0Backup)
+    state.success = '已撤销'
+  }
+}
+
+// Export handlers
+async function exportAsLab() {
+  if (!state.f0Data) return
 
   try {
     state.error = null
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const filename = `${state.audioFile.name.replace(/\.[^.]+$/, '')}_${timestamp}.${format}`
+    const filename = `${state.audioFile?.name.replace(/\.[^.]+$/, '') || 'audio'}_${timestamp}.lab`
 
-    const link = document.createElement('a')
+    const labContent = generateLabFormat(state.f0Data)
+    const blob = new Blob([labContent], { type: 'text/plain' })
     
-    if (format === 'lab') {
-      const labContent = generateLabFormat(state.f0Data)
-      link.href = URL.createObjectURL(new Blob([labContent], { type: 'text/plain' }))
-    } else {
-      const jsonData = {
-        audioFile: state.audioFile.name,
-        sampleRate: state.sampleRate,
-        f0: Array.from(state.f0Data),
-        timestamp: new Date().toISOString(),
-      }
-      link.href = URL.createObjectURL(new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' }))
-    }
-
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
     link.download = filename
     link.click()
     URL.revokeObjectURL(link.href)
+    
+    state.success = `LAB文件已导出: ${filename}`
   } catch (err) {
     state.error = err instanceof Error ? err.message : '导出失败'
   }
 }
 
-async function exportSynthesis(format: 'ustx' | 'svp' | 'vsqx') {
+async function exportAsSynthesis(format: 'ustx' | 'svp' | 'vsqx') {
   if (!state.f0Data) return
 
   try {
     state.error = null
-    
+    state.isProcessing = true
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const filename = `synthesis_${timestamp}.${format}`
-    
+    const filename = `${state.audioFile?.name.replace(/\.[^.]+$/, '') || 'audio'}_${timestamp}.${format}`
+
+    const endpoint = `${baseURL.value}pyworld/synthesis_export`
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({
+        f0: Array.from(state.f0Data),
+        format: format,
+        sampleRate: state.sampleRate,
+        bpm: 120,
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    if (!response.ok) throw new Error(`${format.toUpperCase()}格式导出失败`)
+
+    const blob = await response.blob()
     const link = document.createElement('a')
-    const content = `[Synthesis Data]\nFormat: ${format}\nPitch points: ${state.f0Data.length}\n`
-    link.href = URL.createObjectURL(new Blob([content], { type: 'text/plain' }))
+    link.href = URL.createObjectURL(blob)
     link.download = filename
     link.click()
     URL.revokeObjectURL(link.href)
+    
+    state.success = `${format.toUpperCase()}文件已导出: ${filename}`
   } catch (err) {
     state.error = err instanceof Error ? err.message : '导出失败'
+  } finally {
+    state.isProcessing = false
   }
 }
 
 function generateLabFormat(f0: Float32Array): string {
   let labContent = ''
-  const framePeriod = 5
+  const framePeriod = 5 // milliseconds
   
   for (let i = 0; i < f0.length; i++) {
     const startTime = (i * framePeriod) / 1000
@@ -169,72 +269,125 @@ function generateLabFormat(f0: Float32Array): string {
   
   return labContent
 }
+
+function clearError() {
+  state.error = null
+}
+
+function clearSuccess() {
+  state.success = null
+}
 </script>
 
 <template>
   <div class="app">
+    <!-- Header -->
     <header class="app-header">
-      <h1>Tsubaki Audio Label</h1>
-      <p>音频标注与音高处理工作室</p>
-      <p class="subtitle">Backend: {{ backend }} | API: {{ baseURL }}</p>
+      <div class="header-content">
+        <h1>🎵 Tsubaki Audio Label</h1>
+        <p class="subtitle">音频标注与音高处理工作室</p>
+        <p class="info">Backend: {{ baseURL }} | Status: {{ state.isProcessing ? '处理中...' : '就绪' }}</p>
+      </div>
     </header>
 
+    <!-- Main Content -->
     <main class="app-main">
+      <!-- Alerts -->
+      <div v-if="state.error" class="alert alert-error">
+        <span>⚠️ {{ state.error }}</span>
+        <button @click="clearError" class="btn-close">×</button>
+      </div>
+      
+      <div v-if="state.success" class="alert alert-success">
+        <span>✓ {{ state.success }}</span>
+        <button @click="clearSuccess" class="btn-close">×</button>
+      </div>
+
       <div class="container">
-        <div v-if="state.error" class="error-banner">
-          <span class="error-icon">⚠️</span>
-          <span>{{ state.error }}</span>
-          <button @click="state.error = null" class="close-btn">×</button>
+        <!-- Tabs Navigation -->
+        <div class="tabs-header">
+          <button
+            :class="['tab-btn', { active: state.activeTab === 'waveform' }]"
+            @click="state.activeTab = 'waveform'"
+            :disabled="!isAudioLoaded"
+          >
+            📊 波形图
+          </button>
+          <button
+            :class="['tab-btn', { active: state.activeTab === 'pitch' }]"
+            @click="state.activeTab = 'pitch'"
+            :disabled="!isPitchExtracted && !state.labContent"
+          >
+            🎼 音高编辑
+          </button>
+          <button
+            :class="['tab-btn', { active: state.activeTab === 'export' }]"
+            @click="state.activeTab = 'export'"
+            :disabled="!canExport"
+          >
+            💾 导出
+          </button>
         </div>
 
-        <ControlPanel
-          :is-processing="state.isProcessing"
-          :has-audio="!!state.waveformData"
-          :has-pitch="!!state.f0Data"
-          @load-audio="loadAudioFile"
-          @extract-pitch="extractPitch"
-          @sharpen-pitch="sharpenPitch"
-          @export-label="exportLabel"
-          @export-synthesis="exportSynthesis"
-          :supported-formats="supportedFormats"
-        />
-
-        <div class="editor-container">
-          <AudioPlayer
-            v-if="state.waveformData"
-            :waveform-data="state.waveformData"
-            :sample-rate="state.sampleRate"
-            :audio-file="state.audioFile"
-          />
-
-          <div class="waveform-section">
-            <h3>波形图</h3>
-            <WaveformDisplay
+        <!-- Tab Content -->
+        <div class="tabs-content">
+          <!-- Upload & Waveform Tab -->
+          <div v-if="state.activeTab === 'waveform'" class="tab-pane">
+            <FileUploadPanel
+              @upload-audio="handleAudioUpload"
+              @upload-lab="handleLabUpload"
+              :is-processing="state.isProcessing"
+            />
+            
+            <WaveformViewer
               v-if="state.waveformData"
               :waveform-data="state.waveformData"
-              :pitch-data="state.f0Data"
+              :pitch-data="state.f0Data ?? undefined"
               :sample-rate="state.sampleRate"
+              :duration="state.duration"
             />
-            <div v-else class="placeholder">
-              <p>加载音频文件查看波形</p>
-            </div>
           </div>
 
-          <div class="pitch-section">
-            <h3>音高编辑</h3>
+          <!-- Pitch Editor Tab -->
+          <div v-if="state.activeTab === 'pitch'" class="tab-pane">
+            <PitchExtractor
+              :audio-loaded="isAudioLoaded"
+              :pitch-extracted="isPitchExtracted"
+              :algorithm="state.f0Algorithm"
+              :sharpness="state.pitchSharpness"
+              :base-frequency="state.baseFrequency"
+              :is-processing="state.isProcessing"
+              @extract-pitch="extractPitch"
+              @sharpen-pitch="sharpenPitch"
+              @undo="undoPitchEdit"
+              @update:algorithm="(v: string) => state.f0Algorithm = v as 'dio' | 'harvest'"
+              @update:sharpness="(v: number) => state.pitchSharpness = v"
+              @update:baseFrequency="(v: number) => state.baseFrequency = v"
+            />
+            
             <PitchEditor
               v-if="state.f0Data"
               :pitch-data="state.f0Data"
               :sample-rate="state.sampleRate"
+              :base-frequency="state.baseFrequency"
             />
-            <div v-else class="placeholder">
-              <p>提取音高进行编辑</p>
-            </div>
+          </div>
+
+          <!-- Export Tab -->
+          <div v-if="state.activeTab === 'export'" class="tab-pane">
+            <ExportPanel
+              :has-pitch="isPitchExtracted"
+              :audio-file="state.audioFile"
+              :is-processing="state.isProcessing"
+              @export-lab="exportAsLab"
+              @export-format="(format: string) => exportAsSynthesis(format as 'ustx' | 'svp' | 'vsqx')"
+            />
           </div>
         </div>
       </div>
     </main>
 
+    <!-- Footer -->
     <footer class="app-footer">
       <p>© 2024 Tsubaki Audio Label | Python 3.10.20 | PyWorld</p>
     </footer>
@@ -242,123 +395,207 @@ function generateLabFormat(f0: Float32Array): string {
 </template>
 
 <style scoped>
+:root {
+  --primary: #667eea;
+  --secondary: #764ba2;
+  --success: #48bb78;
+  --error: #f56565;
+  --warning: #ed8936;
+  --border: #e2e8f0;
+  --bg-light: #f7fafc;
+  --text-dark: #2d3748;
+}
+
+* {
+  box-sizing: border-box;
+}
+
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: #f5f5f5;
+  background-color: var(--bg-light);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
+/* Header */
 .app-header {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
   color: white;
-  padding: 20px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  padding: 24px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
-.app-header h1 {
+.header-content h1 {
+  margin: 0 0 8px 0;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.header-content .subtitle {
   margin: 0;
-  font-size: 28px;
-  font-weight: 600;
-}
-
-.app-header p {
-  margin: 5px 0 0;
   font-size: 14px;
-  opacity: 0.9;
+  opacity: 0.95;
 }
 
-.subtitle {
-  font-size: 12px !important;
-  opacity: 0.8 !important;
-  margin-top: 5px !important;
+.header-content .info {
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.8;
 }
 
+/* Main */
 .app-main {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 24px;
 }
 
 .container {
-  max-width: 1400px;
+  max-width: 1600px;
   margin: 0 auto;
 }
 
-.error-banner {
+/* Alerts */
+.alert {
   display: flex;
   align-items: center;
-  gap: 10px;
   padding: 12px 16px;
   margin-bottom: 20px;
-  background: #fee;
-  border-left: 4px solid #f66;
-  border-radius: 4px;
-  color: #c33;
+  border-radius: 6px;
+  font-size: 14px;
+  animation: slideIn 0.3s ease-out;
 }
 
-.error-icon {
-  font-size: 18px;
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
-.close-btn {
+.alert-error {
+  background-color: #fed7d7;
+  border-left: 4px solid var(--error);
+  color: #c53030;
+}
+
+.alert-success {
+  background-color: #c6f6d5;
+  border-left: 4px solid var(--success);
+  color: #22543d;
+}
+
+.btn-close {
   margin-left: auto;
   background: none;
   border: none;
   font-size: 20px;
   cursor: pointer;
-  color: #c33;
+  padding: 0;
+  color: inherit;
 }
 
-.editor-container {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 20px;
-  margin-top: 20px;
+/* Tabs */
+.tabs-header {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  border-bottom: 2px solid var(--border);
+  overflow-x: auto;
 }
 
-.waveform-section,
-.pitch-section {
+.tab-btn {
+  padding: 12px 20px;
+  border: none;
+  background: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: #718096;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  transition: all 0.3s ease;
+  white-space: nowrap;
+}
+
+.tab-btn:hover:not(:disabled) {
+  color: var(--text-dark);
+}
+
+.tab-btn.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+.tab-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tabs-content {
   background: white;
   border-radius: 8px;
-  padding: 20px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  overflow: hidden;
 }
 
-.waveform-section h3,
-.pitch-section h3 {
-  margin: 0 0 15px;
-  font-size: 16px;
-  color: #333;
+.tab-pane {
+  padding: 24px;
+  animation: fadeIn 0.3s ease-out;
 }
 
-.placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 300px;
-  background: #f9f9f9;
-  border: 2px dashed #ddd;
-  border-radius: 4px;
-  color: #999;
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
+/* Footer */
 .app-footer {
-  background: #333;
-  color: #999;
-  padding: 15px 20px;
+  background: var(--text-dark);
+  color: #a0aec0;
+  padding: 16px 24px;
   text-align: center;
   font-size: 12px;
-  border-top: 1px solid #444;
+  border-top: 1px solid var(--border);
 }
 
 .app-footer p {
   margin: 0;
 }
 
-@media (max-width: 1024px) {
+/* Responsive */
+@media (max-width: 768px) {
+  .app-header {
+    padding: 16px;
+  }
+
   .app-header h1 {
     font-size: 24px;
+  }
+
+  .app-main {
+    padding: 16px;
+  }
+
+  .tab-pane {
+    padding: 16px;
+  }
+
+  .tabs-header {
+    gap: 4px;
+  }
+
+  .tab-btn {
+    padding: 10px 16px;
+    font-size: 12px;
   }
 }
 </style>
