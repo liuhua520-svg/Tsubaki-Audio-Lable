@@ -1,6 +1,6 @@
 import { defineComponent } from 'vue'
 
-export default defineComponent({
+const App = defineComponent({
   name: 'App',
   props: {
     backend: String,
@@ -25,3 +25,6 @@ export default defineComponent({
     this.$emit('mount:app', this)
   }
 })
+
+export { App }
+export default App
