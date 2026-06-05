@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import sys
 import socket
 import webbrowser
@@ -235,9 +236,11 @@ def open_browser(host, port):
 
 def main(host="127.0.0.1", port=6701):
     """主函数"""
-    thread = Thread(target=open_browser, args=(host, port), daemon=True)
-    thread.start()
-    app.run(host=host, port=port)
+    # 仅在非调试重启时打开浏览器
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        thread = Thread(target=open_browser, args=(host, port), daemon=True)
+        thread.start()
+    app.run(host=host, port=port, debug=False)
 
 
 if __name__ == "__main__":
