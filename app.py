@@ -166,6 +166,24 @@ def synthesize(f0, sp, ap, fs):
     return packNdarray(data)
 
 
+@app.route("/pyworld/sharpen", methods=["POST"])
+@wrap_msgpack
+def sharpen(f0, sharpness=0.5):
+    """音高锐化处理"""
+    f0 = unpackNdarray(f0)
+    # 对音高进行平滑处理以减少颤动
+    from scipy.ndimage import gaussian_filter1d
+    f0_sharpened = f0.copy()
+    voiced_mask = f0 > 0
+    if voiced_mask.any():
+        f0_voiced = f0[voiced_mask]
+        # 应用高斯滤波平滑颤动
+        smoothing_sigma = max(1, 5 * (1 - sharpness))
+        f0_smoothed = gaussian_filter1d(f0_voiced, sigma=smoothing_sigma)
+        f0_sharpened[voiced_mask] = f0_smoothed
+    return packNdarray(f0_sharpened)
+
+
 @app.route("/pyworld/savefig", methods=["POST"])
 def savefig():
     """生成音频分析图表"""
@@ -240,7 +258,7 @@ def main(host="127.0.0.1", port=6701):
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         thread = Thread(target=open_browser, args=(host, port), daemon=True)
         thread.start()
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=True, use_reloader=False)
 
 
 if __name__ == "__main__":
