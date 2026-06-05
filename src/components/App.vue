@@ -247,50 +247,7 @@ function undoPitchEdit() {
   }
 }
 
-// 导出
-async function exportAsSynthesis(format: 'ustx' | 'svp' | 'vsqx') {
-  if (!state.f0Data) return
-  try {
-    state.error = null
-    state.isProcessing = true
-    const baseName = state.audioFile?.name.replace(/\.[^.]+$/, '') || 'audio'
-
-    const response = await fetch(`${baseURL.value}pyworld/synthesis_export`, {
-      method: 'POST',
-      body: JSON.stringify({ f0: Array.from(state.f0Data), format, sampleRate: state.sampleRate, bpm: 120 }),
-      headers: { 'Content-Type': 'application/json' },
-    })
-
-    if (!response.ok) throw new Error('导出失败')
-    const blob = await response.blob()
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `${baseName}_export.${format}`
-    link.click()
-    state.success = `工程文件导出成功: ${format.toUpperCase()}`
-  } catch (err) {
-    state.error = '导出目标工程发生错误'
-  } finally {
-    state.isProcessing = false
-  }
-}
-
-function exportAsLab() {
-  if (!state.f0Data) return
-  const baseName = state.audioFile?.name.replace(/\.[^.]+$/, '') || 'audio'
-  let labText = ''
-  for (let i = 0; i < state.f0Data.length; i++) {
-    const startTime = (i * 5) / 1000
-    const endTime = ((i + 1) * 5) / 1000
-    labText += `${startTime.toFixed(4)} ${endTime.toFixed(4)} ${state.f0Data[i].toFixed(2)}\n`
-  }
-  const blob = new Blob([labText], { type: 'text/plain' })
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = `${baseName}_pitch.lab`
-  link.click()
-  state.success = '音高 LAB 导出成功'
-}
+// 导出由 ExportPanel.vue 自行处理（全量客户端导出，无需后端）
 </script>
 
 <template>
@@ -375,11 +332,11 @@ function exportAsLab() {
 
           <div v-if="state.activeTab === 'export'" class="tab-pane">
             <ExportPanel
-              :has-pitch="true"
-              :audio-file="state.audioFile"
-              :is-processing="state.isProcessing"
-              @export-lab="exportAsLab"
-              @export-format="(format) => exportAsSynthesis(format as 'ustx' | 'svp' | 'vsqx')"
+              :pitch-data="state.f0Data"
+              :sample-rate="state.sampleRate"
+              :audio-file-name="state.audioFile?.name.replace(/\.[^.]+$/, '') || 'audio'"
+              :lab-content="state.labContent"
+			  :backend-base-url="baseURL"
             />
           </div>
         </div>

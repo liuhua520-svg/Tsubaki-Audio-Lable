@@ -1,16 +1,43 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
+import json
 import socket
 import webbrowser
-import json
 from threading import Thread
-from time import sleep, time
+from time import sleep
 from functools import wraps
-from tempfile import SpooledTemporaryFile as TempFile
-import numpy as np, pyworld as pw, msgpack as mp, soundfile as sf
-from flask import Flask, request, jsonify, render_template
+from tempfile import SpooledTemporaryFile as TempFile, NamedTemporaryFile
+
+import numpy as np
+import pyworld as pw
+import msgpack as mp
+import soundfile as sf
+from flask import Flask, request, jsonify, render_template, Response
 from flask_cors import CORS
+
+# 让 backend 目录可被稳定导入
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+try:
+    from backend.vsqxWrite import write_vsqx
+except Exception as e:
+    write_vsqx = None
+    _vsqx_import_error = e
+
+try:
+    from backend.svpWrite import write_svp
+except Exception as e:
+    write_svp = None
+    _svp_import_error = e
+
+try:
+    from backend.ustxWrite import write_ustx
+except Exception as e:
+    write_ustx = None
+    _ustx_import_error = e
 
 app = Flask(
     __name__, template_folder="./dist", static_folder="./dist", static_url_path="/"
@@ -81,8 +108,7 @@ def soundfile_read():
     info.pop("name", None)
     if data.ndim == 2:
         data = data.swapaxes(0, 1)
-        
-    # ✨ 修复：不再使用 msgpack，直接返回标准的 JSON 响应
+
     return jsonify({"fs": fs, "info": info, "data": packNdarray(data)})
 
 
@@ -91,10 +117,10 @@ def soundfile_write():
     """写入音频文件"""
     raw_data = request.get_data()
     try:
-        requ_body = json.loads(raw_data.decode('utf-8'))
+        requ_body = json.loads(raw_data.decode("utf-8"))
     except Exception:
         requ_body = mp.unpackb(raw_data)
-        
+
     with TempFile(max_size=max_size) as file:
         sf.write(
             file=file,
@@ -109,60 +135,52 @@ def soundfile_write():
 
 
 def wrap_msgpack(func):
-    """智能响应装饰器：保持原名称，但内部全面改用 JSON 与前端完美对接"""
+    """智能响应装饰器：兼容 JSON 与原始二进制字节流"""
     @wraps(func)
     def wrapper(*args, **kwargs):
-        import numpy as np
         import inspect
 
         raw_data = request.get_data()
         requ_body = None
-        
-        # 1. 优先尝试将其解析为标准 JSON (兼容前端的 sharpen 等接口)
+
         if request.is_json:
             try:
                 requ_body = request.get_json()
             except Exception:
                 pass
-        
+
         if requ_body is None:
             try:
-                requ_body = json.loads(raw_data.decode('utf-8'))
+                requ_body = json.loads(raw_data.decode("utf-8"))
             except Exception:
-                # 如果不是 JSON，说明是前端直接传过来的 Float32Array 原始二进制字节流 (如 dio/harvest 接口)
                 requ_body = raw_data
 
-        # 2. 智能化参数匹配与兼容
         if isinstance(requ_body, dict):
-            # 如果解包出来是标准字典，按原样执行调用
             resp_body = func(**requ_body)
         else:
-            # 如果是 bytes（即前端在提取音高时发送的原始音频数据流）
             sig = inspect.signature(func)
             params = list(sig.parameters.keys())
-            
-            # 将前端传来的 Float32Array 字节流转换为 pyworld 要求的 float64 数组
             waveform = np.frombuffer(requ_body, dtype=np.float32).astype(np.float64)
-            
+
             kwargs_to_pass = {}
             if len(params) > 0:
-                kwargs_to_pass[params[0]] = waveform  # 第一个参数通常是 data 
-                
+                kwargs_to_pass[params[0]] = waveform
+
             if len(params) > 1:
-                # 第二个参数采样率 fs
-                url_fs = request.args.get('fs', request.args.get('sampleRate', type=int), type=int)
+                url_fs = request.args.get(
+                    "fs", request.args.get("sampleRate", type=int), type=int
+                )
                 default_fs = sig.parameters[params[1]].default
-                
+
                 if url_fs is not None:
                     kwargs_to_pass[params[1]] = url_fs
                 elif default_fs != inspect.Parameter.empty:
                     kwargs_to_pass[params[1]] = default_fs
                 else:
-                    kwargs_to_pass[params[1]] = 16000  # 默认兜底
-                    
+                    kwargs_to_pass[params[1]] = 16000
+
             resp_body = func(**kwargs_to_pass)
-            
-        # ✨ 核心修复：一律采用 Flask 的 jsonify 返回标准 JSON，彻底干掉 '' 报错
+
         return jsonify(resp_body)
 
     return wrapper
@@ -222,6 +240,7 @@ def sharpen(f0, sharpness=0.5):
     """音高锐化处理"""
     f0 = unpackNdarray(f0)
     from scipy.ndimage import gaussian_filter1d
+
     f0_sharpened = f0.copy()
     voiced_mask = f0 > 0
     if voiced_mask.any():
@@ -243,14 +262,14 @@ def savefig():
 
     raw_data = request.get_data()
     try:
-        requ_body = json.loads(raw_data.decode('utf-8'))
+        requ_body = json.loads(raw_data.decode("utf-8"))
     except Exception:
         requ_body = mp.unpackb(raw_data)
-        
+
     log = requ_body.get("log", True)
     figlist = list(map(lambda x: unpackNdarray(x), requ_body["figlist"]))
     n = len(figlist)
-    
+
     f = figlist[0]
     if len(f.shape) == 1:
         plt.figure()
@@ -285,13 +304,181 @@ def savefig():
     return data, 200, {"Content-Type": "image/png"}
 
 
+def _normalize_lab_segments(payload):
+    """
+    支持两种输入：
+    1) payload["lab_segments"] = [[start, end, phoneme], ...]
+    2) payload["notes"] = [{"start_100ns":..., "end_100ns":..., "phoneme":...}, ...]
+    """
+    if "lab_segments" in payload and payload["lab_segments"]:
+        segs = []
+        for item in payload["lab_segments"]:
+            if len(item) < 3:
+                continue
+            start, end, phoneme = item[0], item[1], item[2]
+            segs.append((int(start), int(end), str(phoneme)))
+        return segs
+
+    if "notes" in payload and payload["notes"]:
+        segs = []
+        for item in payload["notes"]:
+            start = item.get("start_100ns", item.get("start", None))
+            end = item.get("end_100ns", item.get("end", None))
+            phoneme = item.get("phoneme", item.get("lyric", "-"))
+            if start is None or end is None:
+                continue
+            segs.append((int(start), int(end), str(phoneme)))
+        return segs
+
+    return []
+
+
+def _normalize_pitch_map(payload):
+    """
+    支持两种输入：
+    1) payload["pitch_continuous"] = {time100ns: freq, ...}
+    2) payload["pitch_points"] = [{"time_100ns":..., "freq":...}, ...]
+    """
+    if "pitch_continuous" in payload and isinstance(payload["pitch_continuous"], dict):
+        out = {}
+        for k, v in payload["pitch_continuous"].items():
+            try:
+                out[int(k)] = float(v)
+            except Exception:
+                continue
+        return out
+
+    if "pitch_points" in payload and payload["pitch_points"]:
+        out = {}
+        for item in payload["pitch_points"]:
+            t = item.get("time_100ns", item.get("time", None))
+            f = item.get("freq", item.get("pitch", None))
+            if t is None or f is None:
+                continue
+            out[int(t)] = float(f)
+        return out
+
+    return {}
+
+
+def _write_temp_file(writer_func, output_ext, lab_segments, pitch_continuous, bpm):
+    if writer_func is None:
+        raise RuntimeError("writer function is not available")
+
+    with NamedTemporaryFile(delete=False, suffix=output_ext) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        writer_func(lab_segments, pitch_continuous, tmp_path, bpm=bpm)
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+@app.route("/api/export/vsqx", methods=["POST"])
+def export_vsqx():
+    if write_vsqx is None:
+        return jsonify(
+            {
+                "error": "backend.vsqxWrite import failed",
+                "detail": str(globals().get("_vsqx_import_error", "")),
+            }
+        ), 500
+
+    payload = request.get_json(force=True)
+    lab_segments = _normalize_lab_segments(payload)
+    pitch_continuous = _normalize_pitch_map(payload)
+    bpm = float(payload.get("bpm", 120))
+
+    if not lab_segments:
+        return jsonify({"error": "lab_segments 为空"}), 400
+
+    try:
+        data = _write_temp_file(write_vsqx, ".vsqx", lab_segments, pitch_continuous, bpm)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    filename = f'{payload.get("audioFileName", "audio")}.vsqx'
+    return Response(
+        data,
+        mimetype="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/export/svp", methods=["POST"])
+def export_svp():
+    if write_svp is None:
+        return jsonify(
+            {
+                "error": "backend.svpWrite import failed",
+                "detail": str(globals().get("_svp_import_error", "")),
+            }
+        ), 500
+
+    payload = request.get_json(force=True)
+    lab_segments = _normalize_lab_segments(payload)
+    pitch_continuous = _normalize_pitch_map(payload)
+    bpm = float(payload.get("bpm", 120))
+
+    if not lab_segments:
+        return jsonify({"error": "lab_segments 为空"}), 400
+
+    try:
+        data = _write_temp_file(write_svp, ".svp", lab_segments, pitch_continuous, bpm)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    filename = f'{payload.get("audioFileName", "audio")}.svp'
+    return Response(
+        data,
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/export/ustx", methods=["POST"])
+def export_ustx():
+    if write_ustx is None:
+        return jsonify(
+            {
+                "error": "backend.ustxWrite import failed",
+                "detail": str(globals().get("_ustx_import_error", "")),
+            }
+        ), 500
+
+    payload = request.get_json(force=True)
+    lab_segments = _normalize_lab_segments(payload)
+    pitch_continuous = _normalize_pitch_map(payload)
+    bpm = float(payload.get("bpm", 120))
+
+    if not lab_segments:
+        return jsonify({"error": "lab_segments 为空"}), 400
+
+    try:
+        data = _write_temp_file(write_ustx, ".ustx", lab_segments, pitch_continuous, bpm)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    filename = f'{payload.get("audioFileName", "audio")}.ustx'
+    return Response(
+        data,
+        mimetype="text/yaml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def isPortOpen(host, port):
     """检查端口是否开放"""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(0.5)
             s.connect((host, port))
-    except socket.error as e:
+    except socket.error:
         return False
     else:
         return True
@@ -307,7 +494,7 @@ def open_browser(host, port):
 
 def main(host="127.0.0.1", port=6701):
     """主函数"""
-    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
         thread = Thread(target=open_browser, args=(host, port), daemon=True)
         thread.start()
     app.run(host=host, port=port, debug=True, use_reloader=False)
