@@ -112,7 +112,7 @@ npm run dev
 
 ## 许可证
 
-MPL-2.0
+MIT License
 
 ## 参考
 
