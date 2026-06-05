@@ -192,13 +192,15 @@ async function extractPitch() {
     state.f0Backup = state.f0Data ? new Float32Array(state.f0Data) : null
 
     const algorithm = state.f0Algorithm
-    const response = await fetch(`${baseURL.value}pyworld/${algorithm}`, {
+    
+    // ✨ 核心优化：直接发送原始 buffer，通过 URL 参数将采样率（fs）优雅地同步给后端
+    const response = await fetch(`${baseURL.value}pyworld/${algorithm}?fs=${state.sampleRate}`, {
       method: 'POST',
-      body: state.waveformData.buffer as any, // 已修复：通过断言直接放行
+      body: state.waveformData.buffer as any, // 绕过高级 TS 类型检查
       headers: { 'Content-Type': 'application/msgpack' },
     })
 
-    if (!response.ok) throw new Error(`后端算法 ${algorithm.toUpperCase()} 运行失败，请确认 Python 服务已开启`)
+    if (!response.ok) throw new Error(`后端算法 ${algorithm.toUpperCase()} 运行异常，状态码: ${response.status}`)
 
     const buffer = await response.arrayBuffer()
     const data = JSON.parse(new TextDecoder().decode(buffer))

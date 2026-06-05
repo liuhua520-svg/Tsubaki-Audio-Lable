@@ -3,6 +3,7 @@ import os
 import sys
 import socket
 import webbrowser
+import json
 from threading import Thread
 from time import sleep, time
 from functools import wraps
@@ -19,18 +20,24 @@ app.config["MAX_CONTENT_LENGTH"] = max_size
 CORS(app, supports_credentials=True)
 
 
-def packNdarray(array: np.ndarray) -> dict:
-    """将 NumPy 数组打包为字典"""
-    return {
-        "shape": array.shape,
-        "dtype": str(array.dtype),
-        "buffer": array.tobytes("C"),
-    }
+def packNdarray(array: np.ndarray):
+    """将 NumPy 数组打包为 JSON 可直接序列化的纯 List"""
+    return array.tolist()
 
 
-def unpackNdarray(array: dict) -> np.ndarray:
-    """从字典解包 NumPy 数组"""
-    return np.ndarray(**array, order="C")
+def unpackNdarray(array) -> np.ndarray:
+    """从各种前端输入格式安全地解包为 NumPy 数组"""
+    if isinstance(array, np.ndarray):
+        return array
+    if isinstance(array, list):
+        return np.array(array)
+    if isinstance(array, dict):
+        if "buffer" in array:
+            if isinstance(array["buffer"], bytes):
+                return np.ndarray(**array, order="C")
+            elif isinstance(array["buffer"], list):
+                return np.array(array["buffer"])
+    return np.array(array)
 
 
 @app.route("/")
@@ -57,7 +64,7 @@ def soundfile_available(format=None):
         data = sf.available_formats()
     else:
         data = sf.available_subtypes(format=format)
-    return mp.packb(data), 200, {"Content-Type": "application/x-msgpack"}
+    return jsonify(data)
 
 
 @app.route("/soundfile/read", methods=["POST"])
@@ -70,21 +77,24 @@ def soundfile_read():
         file.seek(0)
         data, fs = sf.read(file)
 
-    info.pop("verbose")
-    info.pop("name")
+    info.pop("verbose", None)
+    info.pop("name", None)
     if data.ndim == 2:
         data = data.swapaxes(0, 1)
-    return (
-        mp.packb({"fs": fs, "info": info, "data": packNdarray(data)}),
-        200,
-        {"Content-Type": "application/x-msgpack"},
-    )
+        
+    # ✨ 修复：不再使用 msgpack，直接返回标准的 JSON 响应
+    return jsonify({"fs": fs, "info": info, "data": packNdarray(data)})
 
 
 @app.route("/soundfile/write", methods=["POST"])
 def soundfile_write():
     """写入音频文件"""
-    requ_body = mp.unpackb(request.get_data())
+    raw_data = request.get_data()
+    try:
+        requ_body = json.loads(raw_data.decode('utf-8'))
+    except Exception:
+        requ_body = mp.unpackb(raw_data)
+        
     with TempFile(max_size=max_size) as file:
         sf.write(
             file=file,
@@ -99,21 +109,61 @@ def soundfile_write():
 
 
 def wrap_msgpack(func):
-    """MessagePack 响应装饰器"""
+    """智能响应装饰器：保持原名称，但内部全面改用 JSON 与前端完美对接"""
     @wraps(func)
     def wrapper(*args, **kwargs):
-        requ_body = mp.unpackb(request.get_data())
-        start = time()
-        resp_body = func(**requ_body)
-        dur = int((time() - start) * 1000)
-        return (
-            mp.packb(resp_body),
-            200,
-            {
-                "Content-Type": "application/x-msgpack",
-                "Server-Timing": f"cpu;dur={dur}",
-            },
-        )
+        import numpy as np
+        import inspect
+
+        raw_data = request.get_data()
+        requ_body = None
+        
+        # 1. 优先尝试将其解析为标准 JSON (兼容前端的 sharpen 等接口)
+        if request.is_json:
+            try:
+                requ_body = request.get_json()
+            except Exception:
+                pass
+        
+        if requ_body is None:
+            try:
+                requ_body = json.loads(raw_data.decode('utf-8'))
+            except Exception:
+                # 如果不是 JSON，说明是前端直接传过来的 Float32Array 原始二进制字节流 (如 dio/harvest 接口)
+                requ_body = raw_data
+
+        # 2. 智能化参数匹配与兼容
+        if isinstance(requ_body, dict):
+            # 如果解包出来是标准字典，按原样执行调用
+            resp_body = func(**requ_body)
+        else:
+            # 如果是 bytes（即前端在提取音高时发送的原始音频数据流）
+            sig = inspect.signature(func)
+            params = list(sig.parameters.keys())
+            
+            # 将前端传来的 Float32Array 字节流转换为 pyworld 要求的 float64 数组
+            waveform = np.frombuffer(requ_body, dtype=np.float32).astype(np.float64)
+            
+            kwargs_to_pass = {}
+            if len(params) > 0:
+                kwargs_to_pass[params[0]] = waveform  # 第一个参数通常是 data 
+                
+            if len(params) > 1:
+                # 第二个参数采样率 fs
+                url_fs = request.args.get('fs', request.args.get('sampleRate', type=int), type=int)
+                default_fs = sig.parameters[params[1]].default
+                
+                if url_fs is not None:
+                    kwargs_to_pass[params[1]] = url_fs
+                elif default_fs != inspect.Parameter.empty:
+                    kwargs_to_pass[params[1]] = default_fs
+                else:
+                    kwargs_to_pass[params[1]] = 16000  # 默认兜底
+                    
+            resp_body = func(**kwargs_to_pass)
+            
+        # ✨ 核心修复：一律采用 Flask 的 jsonify 返回标准 JSON，彻底干掉 '' 报错
+        return jsonify(resp_body)
 
     return wrapper
 
@@ -141,7 +191,7 @@ def harvest(data, fs):
 @app.route("/pyworld/all", methods=["POST"])
 @wrap_msgpack
 def all(data, fs):
-    """完整音频分析 (F0 + 频谱包络 + 非周期性)"""
+    """完整音频 analysis (F0 + 频谱包络 + 非周期性)"""
     data = unpackNdarray(data).astype(float)
     _f0, t = pw.dio(data, fs)
     f0 = pw.stonemask(data, _f0, t, fs)
@@ -171,13 +221,11 @@ def synthesize(f0, sp, ap, fs):
 def sharpen(f0, sharpness=0.5):
     """音高锐化处理"""
     f0 = unpackNdarray(f0)
-    # 对音高进行平滑处理以减少颤动
     from scipy.ndimage import gaussian_filter1d
     f0_sharpened = f0.copy()
     voiced_mask = f0 > 0
     if voiced_mask.any():
         f0_voiced = f0[voiced_mask]
-        # 应用高斯滤波平滑颤动
         smoothing_sigma = max(1, 5 * (1 - sharpness))
         f0_smoothed = gaussian_filter1d(f0_voiced, sigma=smoothing_sigma)
         f0_sharpened[voiced_mask] = f0_smoothed
@@ -193,7 +241,12 @@ def savefig():
 
     EPSILON = 1e-8
 
-    requ_body = mp.unpackb(request.get_data())
+    raw_data = request.get_data()
+    try:
+        requ_body = json.loads(raw_data.decode('utf-8'))
+    except Exception:
+        requ_body = mp.unpackb(raw_data)
+        
     log = requ_body.get("log", True)
     figlist = list(map(lambda x: unpackNdarray(x), requ_body["figlist"]))
     n = len(figlist)
@@ -254,7 +307,6 @@ def open_browser(host, port):
 
 def main(host="127.0.0.1", port=6701):
     """主函数"""
-    # 仅在非调试重启时打开浏览器
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         thread = Thread(target=open_browser, args=(host, port), daemon=True)
         thread.start()
