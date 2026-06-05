@@ -1,7 +1,8 @@
 <script lang="ts">
 import { defineComponent } from 'vue'
 
-export const App = defineComponent({
+// ✅ 直接 export default，不要声明中间变量，也不要具名 export const
+export default defineComponent({
   name: 'App',
   props: {
     backend: String,
@@ -12,8 +13,6 @@ export const App = defineComponent({
     this.$emit('mount:app', this)
   }
 })
-
-export default App
 </script>
 
 <template>

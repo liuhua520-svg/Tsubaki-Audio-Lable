@@ -13,7 +13,7 @@ export default defineConfig({
   },
   build: {
     outDir: '../dist',
-    emptyOutDir: false,
+    emptyOutDir: true,
     target: 'esnext',
     modulePreload: false,
     cssCodeSplit: false,

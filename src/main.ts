@@ -1,7 +1,6 @@
-import './main.css'   // ← 加这一行
+import './main.css'
 import { createApp } from 'vue'
-import { App } from './components/app.vue'
-// ... 其余不变
+import App from './components/app.vue' // ✅ 去掉花括号，引入完整的组件（包含模板）
 
 const getBackend = (el = document.documentElement) => {
   let backend = el.dataset.backend
